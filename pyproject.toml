@@ -1,0 +1,96 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "workspace-mcp"
+version = "0.1.0"
+description = "High-performance, vendor-neutral Google Workspace Hybrid MCP Server combining IMAP PEEK email reading and CalDAV multi-calendar querying with native OS biometric-gated messaging"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [
+    { name = "Google Workspace MCP Contributors" }
+]
+keywords = [
+    "google-workspace",
+    "mcp",
+    "imap",
+    "caldav",
+    "touch-id",
+    "windows-hello",
+    "biometrics",
+    "ai-agent"
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Communications :: Email",
+]
+dependencies = [
+    "mcp>=1.12.0,<2",
+    "pydantic>=2.7.0,<3",
+    "pydantic-settings>=2.2.0,<3",
+    "keyring>=24.0.0",
+    "python-dotenv>=1.0.0,<2",
+    "typing-extensions>=4.9.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/hemelbesem90s/Google-Workspace-MCP"
+Repository = "https://github.com/hemelbesem90s/Google-Workspace-MCP"
+Issues = "https://github.com/hemelbesem90s/Google-Workspace-MCP/issues"
+
+[project.optional-dependencies]
+dev = [
+    "mypy>=1.14.0",
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=6.0.0",
+    "ruff>=0.9.0",
+]
+
+[project.scripts]
+workspace-mcp = "workspace_mcp.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["workspace", "workspace_mcp"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["workspace", "workspace_mcp"]
+
+[tool.coverage.report]
+fail_under = 85
+show_missing = true
+skip_covered = true
+
+[tool.mypy]
+files = ["workspace", "workspace_mcp"]
+python_version = "3.10"
+check_untyped_defs = true
+ignore_missing_imports = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+ignore_errors = true
+
+[tool.ruff]
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
