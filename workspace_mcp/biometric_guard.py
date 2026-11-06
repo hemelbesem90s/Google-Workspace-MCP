@@ -112,6 +112,21 @@ def format_write_prompt(tool_name: str, arguments: Dict[str, Any]) -> str:
         cal_str = f" in calendar '{cal_name}'" if cal_name else ""
         return f"Google Workspace MCP: Authorize deleting calendar event UID '{uid}'{cal_str}"
 
+    if tool_name == "update_calendar_event":
+        uid = args.get("uid", "[Event UID]")
+        summary = args.get("summary")
+        sum_str = f" ('{summary}')" if summary else ""
+        return f"Google Workspace MCP: Authorize updating calendar event UID '{uid}'{sum_str}"
+
+    if tool_name == "move_calendar_event":
+        uid = args.get("uid", "[Event UID]")
+        to_cal = args.get("to_calendar", "target calendar")
+        return f"Google Workspace MCP: Authorize moving calendar event UID '{uid}' to '{to_cal}'"
+
+    if tool_name == "batch_calendar_mutations":
+        ops = args.get("operations", [])
+        return f"Google Workspace MCP: Authorize batch of {len(ops)} calendar mutation(s)"
+
     return f"Google Workspace MCP: Authorize write tool '{tool_name}'"
 
 

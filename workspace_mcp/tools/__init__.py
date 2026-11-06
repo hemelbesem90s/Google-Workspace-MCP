@@ -6,10 +6,13 @@ from typing import Set
 
 from workspace_mcp.tools.base import BaseTool, ToolRegistry, ToolSchema
 from workspace_mcp.tools.calendar import (
+    BatchCalendarMutationsTool,
     CreateCalendarEventTool,
     DeleteCalendarEventTool,
     ListCalendarEventsTool,
     ListCalendarsTool,
+    MoveCalendarEventTool,
+    UpdateCalendarEventTool,
 )
 from workspace_mcp.tools.email import (
     GetEmailTool,
@@ -22,6 +25,9 @@ WRITE_TOOL_NAMES: Set[str] = {
     "send_email",
     "create_calendar_event",
     "delete_calendar_event",
+    "update_calendar_event",
+    "move_calendar_event",
+    "batch_calendar_mutations",
 }
 
 
@@ -40,6 +46,9 @@ def register_all_tools(registry: ToolRegistry) -> None:
     registry.register(ListCalendarEventsTool())
     registry.register(CreateCalendarEventTool())
     registry.register(DeleteCalendarEventTool())
+    registry.register(UpdateCalendarEventTool())
+    registry.register(MoveCalendarEventTool())
+    registry.register(BatchCalendarMutationsTool())
 
 
 __all__ = [

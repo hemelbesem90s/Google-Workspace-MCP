@@ -18,9 +18,21 @@ from workspace.exceptions import CalendarError
 
 
 def test_format_ical_datetime() -> None:
-    assert format_ical_datetime("2026-11-06T14:00:00Z") == "20261106T140000Z"
-    assert format_ical_datetime("2026-11-06 14:00:00") == "20261106T140000Z"
-    assert format_ical_datetime("20261106T140000Z") == "20261106T140000Z"
+    dt, all_day = format_ical_datetime("2026-11-06T14:00:00Z")
+    assert dt == "20261106T140000Z"
+    assert all_day is False
+
+    dt, all_day = format_ical_datetime("2026-11-06 14:00:00")
+    assert dt == "20261106T140000Z"
+    assert all_day is False
+
+    dt, all_day = format_ical_datetime("20261106T140000Z")
+    assert dt == "20261106T140000Z"
+    assert all_day is False
+
+    dt, all_day = format_ical_datetime("2026-11-06")
+    assert dt == "20261106"
+    assert all_day is True
 
 
 def test_parse_ics_vevent_ignores_vtimezone() -> None:
@@ -276,5 +288,111 @@ def test_calendar_http_errors(
 
     with pytest.raises(CalendarError, match="HTTP error deleting event"):
         client.delete_event(event_uid="err-uid-123")
+
+
+def test_calendar_update_move_and_batch(
+    mock_config: WorkspaceConfig,
+    sample_propfind_xml: bytes,
+    sample_report_xml: bytes,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = CalendarClient(mock_config)
+
+    raw_sample_ics = (
+        "BEGIN:VCALENDAR\r\n"
+        "VERSION:2.0\r\n"
+        "BEGIN:VEVENT\r\n"
+        "UID:event-123@google.com\r\n"
+        "SUMMARY:Original Summary\r\n"
+        "DTSTART:20261106T100000Z\r\n"
+        "DTEND:20261106T110000Z\r\n"
+        "LOCATION:Old Office\r\n"
+        "DESCRIPTION:Old Notes\r\n"
+        "END:VEVENT\r\n"
+        "END:VCALENDAR\r\n"
+    )
+
+    def mock_urlopen(req, timeout=None):
+        mock_resp = MagicMock()
+        mock_resp.__enter__.return_value = mock_resp
+        method = req.get_method()
+        if method == "PROPFIND":
+            mock_resp.read.return_value = sample_propfind_xml
+            mock_resp.status = 200
+        elif method == "REPORT":
+            mock_resp.read.return_value = sample_report_xml
+            mock_resp.status = 207
+        elif method == "GET":
+            if "event-123" in req.full_url:
+                mock_resp.read.return_value = raw_sample_ics.encode("utf-8")
+                mock_resp.status = 200
+            else:
+                raise urllib.error.HTTPError(req.full_url, 404, "Not Found", {}, io.BytesIO(b""))
+        elif method in ("PUT", "DELETE"):
+            mock_resp.status = 204
+            mock_resp.read.return_value = b""
+        return mock_resp
+
+    monkeypatch.setattr("urllib.request.urlopen", mock_urlopen)
+
+    # 1. Update event
+    up_res = client.update_event(
+        event_uid="event-123@google.com",
+        summary="Updated Title",
+        location="New Location",
+        description="Updated Notes",
+        start="2026-11-06T12:00:00Z",
+        end="2026-11-06T13:00:00Z",
+    )
+    assert up_res.success is True
+    assert up_res.summary == "Updated Title"
+    assert up_res.location == "New Location"
+
+    # 2. Move event
+    mv_res = client.move_event(
+        event_uid="event-123@google.com",
+        to_calendar="Team Calendar",
+        new_location="Secondary Office",
+    )
+    assert mv_res.success is True
+    assert mv_res.to_calendar == "Team Calendar"
+
+    # 3. Batch mutate
+    batch_ops = [
+        {
+            "action": "create",
+            "summary": "Batch Created",
+            "start": "2026-11-07",
+            "end": "2026-11-08",
+            "all_day": True,
+        },
+        {
+            "action": "update",
+            "uid": "event-123@google.com",
+            "location": "Batch Updated Loc",
+        },
+        {
+            "action": "move",
+            "uid": "event-123@google.com",
+            "to_calendar": "primary",
+        },
+        {
+            "action": "delete",
+            "uid": "event-123@google.com",
+        },
+        {
+            "action": "invalid_op",
+            "uid": "x",
+        }
+    ]
+    batch_res = client.batch_mutate(batch_ops)
+    assert batch_res.total_operations == 5
+    assert batch_res.succeeded_operations == 4
+    assert batch_res.failed_operations == 1
+    assert batch_res.success is False
+
+    # 4. list_events with date filter
+    date_filtered = client.list_events(start_date="2026-01-01", end_date="2026-12-31")
+    assert isinstance(date_filtered, list)
 
 

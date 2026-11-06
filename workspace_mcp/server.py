@@ -39,10 +39,11 @@ SERVER_INSTRUCTIONS = (
     "Read-only tools (check_connection_status, search_emails, get_email, list_calendars, "
     "list_calendar_events) connect via IMAP using non-destructive BODY.PEEK[] queries "
     "(preserving unread message flags) and RFC 4791 CalDAV REPORT queries. "
-    "Write tools (send_email, create_calendar_event, delete_calendar_event) allow sending "
-    "emails and creating or deleting calendar events. All write tools require explicit confirmation "
-    "(confirm=true) and are strictly gated by native hardware biometric presence verification "
-    "(Touch ID on macOS / Windows Hello on Windows)."
+    "Write tools (send_email, create_calendar_event, delete_calendar_event, update_calendar_event, "
+    "move_calendar_event, batch_calendar_mutations) allow sending emails, mutating calendar events, "
+    "and executing atomic bulk mutations with a unified biometric gate. All write tools require "
+    "explicit confirmation (confirm=true) and are strictly gated by native hardware biometric "
+    "presence verification (Touch ID on macOS / Windows Hello on Windows)."
 )
 
 

@@ -6,18 +6,25 @@ from unittest.mock import MagicMock
 import pytest
 
 from workspace.models import (
+    BatchMutationItemResult,
+    BatchMutationsResult,
     CalendarEvent,
     CalendarInfo,
     CreateEventResult,
     DeleteEventResult,
     EmailMessage,
+    MoveEventResult,
     SendEmailResult,
+    UpdateEventResult,
 )
 from workspace_mcp.tools.calendar import (
+    BatchCalendarMutationsTool,
     CreateCalendarEventTool,
     DeleteCalendarEventTool,
     ListCalendarEventsTool,
     ListCalendarsTool,
+    MoveCalendarEventTool,
+    UpdateCalendarEventTool,
 )
 from workspace_mcp.tools.email import (
     GetEmailTool,
@@ -237,3 +244,76 @@ async def test_delete_calendar_event_tool_success() -> None:
     res = await tool.execute(mock_gmail, mock_cal, {"uid": "ev-123", "confirm": True})
     assert res["success"] is True
     assert res["uid"] == "ev-123"
+
+
+@pytest.mark.asyncio
+async def test_update_calendar_event_tool() -> None:
+    mock_gmail = MagicMock()
+    mock_cal = MagicMock()
+    mock_cal.update_event.return_value = UpdateEventResult(
+        success=True,
+        action="update",
+        calendar="Primary",
+        uid="ev-123",
+        summary="New Title",
+        start="20261106T100000Z",
+        end="20261106T110000Z",
+        location="New Loc",
+        description="New Desc",
+        url="https://cal.example.com/ev-123.ics",
+    )
+
+    tool = UpdateCalendarEventTool()
+    with pytest.raises(ValueError, match="Explicit confirmation"):
+        await tool.execute(mock_gmail, mock_cal, {"uid": "ev-123", "summary": "New Title", "confirm": False})
+
+    res = await tool.execute(mock_gmail, mock_cal, {"uid": "ev-123", "summary": "New Title", "confirm": True})
+    assert res["success"] is True
+    assert res["summary"] == "New Title"
+
+
+@pytest.mark.asyncio
+async def test_move_calendar_event_tool() -> None:
+    mock_gmail = MagicMock()
+    mock_cal = MagicMock()
+    mock_cal.move_event.return_value = MoveEventResult(
+        success=True,
+        action="move",
+        from_calendar="Primary",
+        to_calendar="Contract Clients",
+        uid="ev-123",
+        summary="Title",
+        url="https://cal.example.com/ev-123.ics",
+    )
+
+    tool = MoveCalendarEventTool()
+    with pytest.raises(ValueError, match="Explicit confirmation"):
+        await tool.execute(mock_gmail, mock_cal, {"uid": "ev-123", "to_calendar": "Contract Clients", "confirm": False})
+
+    res = await tool.execute(mock_gmail, mock_cal, {"uid": "ev-123", "to_calendar": "Contract Clients", "confirm": True})
+    assert res["success"] is True
+    assert res["to_calendar"] == "Contract Clients"
+
+
+@pytest.mark.asyncio
+async def test_batch_calendar_mutations_tool() -> None:
+    mock_gmail = MagicMock()
+    mock_cal = MagicMock()
+    mock_cal.batch_mutate.return_value = BatchMutationsResult(
+        success=True,
+        action="batch_mutations",
+        total_operations=1,
+        succeeded_operations=1,
+        failed_operations=0,
+        results=[
+            BatchMutationItemResult(index=0, action="create", success=True, uid="new-1")
+        ],
+    )
+
+    tool = BatchCalendarMutationsTool()
+    with pytest.raises(ValueError, match="Explicit confirmation"):
+        await tool.execute(mock_gmail, mock_cal, {"operations": [{"action": "create"}], "confirm": False})
+
+    res = await tool.execute(mock_gmail, mock_cal, {"operations": [{"action": "create"}], "confirm": True})
+    assert res["success"] is True
+    assert res["succeeded_operations"] == 1

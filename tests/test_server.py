@@ -33,7 +33,7 @@ async def test_list_tools_all_enabled(mock_mcp_server: WorkspaceMCPServer) -> No
     list_handler = app.request_handlers[ListToolsRequest]
     res = await list_handler(ListToolsRequest(method="tools/list"))
     tool_names = {t.name for t in res.root.tools}
-    assert len(tool_names) == 8
+    assert len(tool_names) == 11
     assert "check_connection_status" in tool_names
     assert "search_emails" in tool_names
     assert "get_email" in tool_names
@@ -42,6 +42,9 @@ async def test_list_tools_all_enabled(mock_mcp_server: WorkspaceMCPServer) -> No
     assert "list_calendar_events" in tool_names
     assert "create_calendar_event" in tool_names
     assert "delete_calendar_event" in tool_names
+    assert "update_calendar_event" in tool_names
+    assert "move_calendar_event" in tool_names
+    assert "batch_calendar_mutations" in tool_names
 
 
 def test_tool_is_enabled(monkeypatch: pytest.MonkeyPatch) -> None:

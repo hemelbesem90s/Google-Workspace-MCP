@@ -95,6 +95,63 @@ class DeleteEventResult(BaseModel):
     error: Optional[str] = None
 
 
+class UpdateEventResult(BaseModel):
+    """Result of updating a calendar event."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    success: bool = True
+    action: str = "update"
+    calendar: str
+    uid: str
+    summary: str
+    start: str
+    end: str
+    location: str = ""
+    description: str = ""
+    url: str
+
+
+class MoveEventResult(BaseModel):
+    """Result of moving a calendar event across calendars."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    success: bool = True
+    action: str = "move"
+    from_calendar: str
+    to_calendar: str
+    uid: str
+    summary: str
+    url: str
+
+
+class BatchMutationItemResult(BaseModel):
+    """Result of an individual mutation within a batch operation."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    index: int
+    action: str
+    success: bool
+    uid: Optional[str] = None
+    calendar: Optional[str] = None
+    error: Optional[str] = None
+
+
+class BatchMutationsResult(BaseModel):
+    """Result of executing a batch of calendar mutations."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    success: bool = True
+    action: str = "batch_mutations"
+    total_operations: int
+    succeeded_operations: int
+    failed_operations: int
+    results: List[BatchMutationItemResult] = Field(default_factory=list)
+
+
 class ConnectionStatus(BaseModel):
     """Diagnostic status of Workspace IMAP, SMTP, and CalDAV services."""
 

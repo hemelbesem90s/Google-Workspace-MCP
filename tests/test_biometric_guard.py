@@ -55,6 +55,20 @@ def test_format_write_prompt_delete_calendar_event() -> None:
     assert "Team Calendar" in prompt
 
 
+def test_format_write_prompt_new_tools() -> None:
+    up_prompt = format_write_prompt("update_calendar_event", {"uid": "ev-123", "summary": "Project Sync"})
+    assert "updating" in up_prompt or "update_calendar_event" in up_prompt
+    assert "ev-123" in up_prompt
+    assert "Project Sync" in up_prompt
+
+    mv_prompt = format_write_prompt("move_calendar_event", {"uid": "ev-123", "to_calendar": "Contract Clients"})
+    assert "moving" in mv_prompt
+    assert "Contract Clients" in mv_prompt
+
+    batch_prompt = format_write_prompt("batch_calendar_mutations", {"operations": [{"action": "update"}, {"action": "delete"}]})
+    assert "batch of 2 calendar mutation" in batch_prompt
+
+
 def test_format_write_prompt_fallback() -> None:
     prompt = format_write_prompt("unknown_write_tool", {"foo": "bar"})
     assert "unknown_write_tool" in prompt

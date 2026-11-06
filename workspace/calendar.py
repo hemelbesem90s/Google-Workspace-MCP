@@ -16,17 +16,39 @@ import xml.etree.ElementTree as ET
 
 from workspace.config import WorkspaceConfig
 from workspace.exceptions import CalendarError
-from workspace.models import CalendarEvent, CalendarInfo, CreateEventResult, DeleteEventResult
+from workspace.models import (
+    BatchMutationItemResult,
+    BatchMutationsResult,
+    CalendarEvent,
+    CalendarInfo,
+    CreateEventResult,
+    DeleteEventResult,
+    MoveEventResult,
+    UpdateEventResult,
+)
 
 logger = logging.getLogger(__name__)
 
 
-def format_ical_datetime(dt_str: str) -> str:
-    """Format standard ISO 8601 or date strings into iCalendar DTSTART/DTEND format."""
-    clean = re.sub(r"[-:]", "", dt_str).strip().replace(" ", "T")
-    if "T" in clean and not clean.endswith("Z"):
-        clean += "Z"
-    return clean
+def format_ical_datetime(dt_str: str, is_all_day: Optional[bool] = None) -> tuple[str, bool]:
+    """Format standard ISO 8601 or date strings into iCalendar DTSTART/DTEND format.
+
+    Returns:
+        tuple of (formatted_string, is_all_day_boolean)
+    """
+    clean = dt_str.strip()
+    # Check if purely date: YYYY-MM-DD or YYYYMMDD
+    is_date_only = bool(re.match(r"^\d{4}-?\d{2}-?\d{2}$", clean))
+    all_day = is_all_day if is_all_day is not None else is_date_only
+
+    clean_digits = re.sub(r"[-:]", "", clean).replace(" ", "T")
+    if all_day:
+        # Return YYYYMMDD without time or Z
+        return clean_digits[:8], True
+
+    if "T" in clean_digits and not clean_digits.endswith("Z"):
+        clean_digits += "Z"
+    return clean_digits, False
 
 
 def parse_ics_vevent(ics_text: str) -> Dict[str, Any]:
@@ -97,12 +119,19 @@ def generate_ics(
     end: str,
     description: str = "",
     location: str = "",
+    all_day: Optional[bool] = None,
 ) -> str:
-    """Generate an RFC 5545 compliant VCALENDAR/VEVENT payload."""
+    """Generate an RFC 5545 compliant VCALENDAR/VEVENT payload supporting timed and multi-day date events."""
     dtstamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     esc_sum = summary.replace("\\", "\\\\").replace(",", "\\,").replace(";", "\\;").replace("\n", "\\n")
     esc_desc = description.replace("\\", "\\\\").replace(",", "\\,").replace(";", "\\;").replace("\n", "\\n")
     esc_loc = location.replace("\\", "\\\\").replace(",", "\\,").replace(";", "\\;").replace("\n", "\\n")
+
+    start_val, start_all_day = format_ical_datetime(start, all_day)
+    end_val, end_all_day = format_ical_datetime(end, all_day)
+
+    dtstart_line = f"DTSTART;VALUE=DATE:{start_val}" if start_all_day else f"DTSTART:{start_val}"
+    dtend_line = f"DTEND;VALUE=DATE:{end_val}" if end_all_day else f"DTEND:{end_val}"
 
     lines = [
         "BEGIN:VCALENDAR",
@@ -113,8 +142,8 @@ def generate_ics(
         f"DTSTAMP:{dtstamp}",
         f"UID:{uid}",
         f"SUMMARY:{esc_sum}",
-        f"DTSTART:{format_ical_datetime(start)}",
-        f"DTEND:{format_ical_datetime(end)}",
+        dtstart_line,
+        dtend_line,
     ]
     if esc_desc:
         lines.append(f"DESCRIPTION:{esc_desc}")
@@ -268,9 +297,11 @@ class CalendarClient:
         self,
         calendar_filter: Optional[str] = None,
         query: Optional[str] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
         limit: int = 25,
     ) -> List[CalendarEvent]:
-        """List events across specified calendar or all calendars."""
+        """List events across specified calendar or all calendars with optional text and date filters."""
         available_calendars = self.discover_calendars()
         target_calendars: List[CalendarInfo] = []
 
@@ -293,10 +324,19 @@ class CalendarClient:
             if not target_calendars and available_calendars:
                 target_calendars = [available_calendars[0]]
 
+        clean_start_filter = re.sub(r"[-:]", "", start_date).replace(" ", "T")[:8] if start_date else None
+        clean_end_filter = re.sub(r"[-:]", "", end_date).replace(" ", "T")[:8] if end_date else None
+
         all_events: List[CalendarEvent] = []
         for cal in target_calendars:
             evs = self.query_calendar_events(cal.url, cal.name, query=query)
-            all_events.extend(evs)
+            for ev in evs:
+                ev_date = re.sub(r"[-:]", "", ev.start)[:8]
+                if clean_start_filter and ev_date < clean_start_filter:
+                    continue
+                if clean_end_filter and ev_date > clean_end_filter:
+                    continue
+                all_events.append(ev)
 
         all_events.sort(key=lambda ev: ev.start, reverse=True)
         return all_events[:limit]
@@ -309,6 +349,7 @@ class CalendarClient:
         description: str = "",
         location: str = "",
         calendar_name: Optional[str] = None,
+        all_day: Optional[bool] = None,
     ) -> CreateEventResult:
         """Create a new calendar event via CalDAV PUT."""
         if not summary:
@@ -344,7 +385,15 @@ class CalendarClient:
         domain = self.config.email.split("@")[-1] if "@" in self.config.email else "google.com"
         uid = f"{uuid.uuid4()}@{domain}"
         event_url = f"{target_url.rstrip('/')}/{uid}.ics"
-        payload = generate_ics(uid, summary, start, end, description, location).encode("utf-8")
+        payload = generate_ics(
+            uid=uid,
+            summary=summary,
+            start=start,
+            end=end,
+            description=description,
+            location=location,
+            all_day=all_day,
+        ).encode("utf-8")
 
         req = self._build_request(
             "PUT",
@@ -413,4 +462,336 @@ class CalendarClient:
             action="delete",
             uid=event_uid,
             error=f"Event UID '{event_uid}' not found in accessible calendars.",
+        )
+
+    def get_event_raw(self, event_uid: str, calendar_name: Optional[str] = None) -> tuple[Optional[str], Optional[str], Optional[CalendarInfo]]:
+        """Fetch raw ICS content and URL for an event by UID.
+
+        Returns:
+            (raw_ics, event_url, calendar_info)
+        """
+        clean_uid = event_uid if event_uid.endswith(".ics") else f"{event_uid}.ics"
+        calendars = self.discover_calendars()
+        target_calendars = calendars
+        if calendar_name:
+            target_calendars = [c for c in calendars if calendar_name.lower() in c.name.lower()]
+
+        for cal in target_calendars:
+            event_url = f"{cal.url.rstrip('/')}/{clean_uid}"
+            req = self._build_request("GET", event_url)
+            try:
+                with urllib.request.urlopen(req, timeout=self.config.timeout_seconds) as resp:
+                    if resp.status == 200:
+                        raw = resp.read().decode("utf-8")
+                        return raw, event_url, cal
+            except urllib.error.HTTPError as exc:
+                if exc.code == 404:
+                    continue
+                raise CalendarError(f"HTTP error fetching event (HTTP {exc.code}): {exc.reason}") from exc
+            except Exception as exc:
+                raise CalendarError(f"Error fetching event: {exc}") from exc
+
+        return None, None, None
+
+    def update_event(
+        self,
+        event_uid: str,
+        summary: Optional[str] = None,
+        start: Optional[str] = None,
+        end: Optional[str] = None,
+        location: Optional[str] = None,
+        description: Optional[str] = None,
+        calendar_name: Optional[str] = None,
+        all_day: Optional[bool] = None,
+    ) -> UpdateEventResult:
+        """Update an existing calendar event's metadata without changing its UID."""
+        if not event_uid:
+            raise CalendarError("Event UID is required for update.")
+
+        raw_ics, event_url, cal_info = self.get_event_raw(event_uid, calendar_name=calendar_name)
+        if not raw_ics or not event_url or not cal_info:
+            raise CalendarError(f"Event with UID '{event_uid}' not found.")
+
+        updated_ics = raw_ics
+
+        if summary is not None:
+            esc = summary.replace("\\", "\\\\").replace(",", "\\,").replace(";", "\\;").replace("\n", "\\n")
+            if re.search(r"^SUMMARY:.*$", updated_ics, flags=re.MULTILINE):
+                updated_ics = re.sub(r"^SUMMARY:.*$", f"SUMMARY:{esc}", updated_ics, flags=re.MULTILINE)
+            else:
+                updated_ics = updated_ics.replace("END:VEVENT", f"SUMMARY:{esc}\r\nEND:VEVENT")
+
+        if location is not None:
+            esc = location.replace("\\", "\\\\").replace(",", "\\,").replace(";", "\\;").replace("\n", "\\n")
+            if re.search(r"^LOCATION:.*$", updated_ics, flags=re.MULTILINE):
+                updated_ics = re.sub(r"^LOCATION:.*$", f"LOCATION:{esc}", updated_ics, flags=re.MULTILINE)
+            else:
+                updated_ics = updated_ics.replace("END:VEVENT", f"LOCATION:{esc}\r\nEND:VEVENT")
+
+        if description is not None:
+            esc = description.replace("\\", "\\\\").replace(",", "\\,").replace(";", "\\;").replace("\n", "\\n")
+            if re.search(r"^DESCRIPTION:.*$", updated_ics, flags=re.MULTILINE):
+                updated_ics = re.sub(r"^DESCRIPTION:.*$", f"DESCRIPTION:{esc}", updated_ics, flags=re.MULTILINE)
+            else:
+                updated_ics = updated_ics.replace("END:VEVENT", f"DESCRIPTION:{esc}\r\nEND:VEVENT")
+
+        if start is not None:
+            start_val, s_all_day = format_ical_datetime(start, all_day)
+            start_line = f"DTSTART;VALUE=DATE:{start_val}" if s_all_day else f"DTSTART:{start_val}"
+            if re.search(r"^DTSTART.*$", updated_ics, flags=re.MULTILINE):
+                updated_ics = re.sub(r"^DTSTART.*$", start_line, updated_ics, flags=re.MULTILINE)
+            else:
+                updated_ics = updated_ics.replace("END:VEVENT", f"{start_line}\r\nEND:VEVENT")
+
+        if end is not None:
+            end_val, e_all_day = format_ical_datetime(end, all_day)
+            end_line = f"DTEND;VALUE=DATE:{end_val}" if e_all_day else f"DTEND:{end_val}"
+            if re.search(r"^DTEND.*$", updated_ics, flags=re.MULTILINE):
+                updated_ics = re.sub(r"^DTEND.*$", end_line, updated_ics, flags=re.MULTILINE)
+            else:
+                updated_ics = updated_ics.replace("END:VEVENT", f"{end_line}\r\nEND:VEVENT")
+
+        req = self._build_request(
+            "PUT",
+            event_url,
+            data=updated_ics.encode("utf-8"),
+            headers={"Content-Type": "text/calendar; charset=utf-8"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self.config.timeout_seconds) as resp:
+                if resp.status in (200, 201, 204):
+                    parsed = parse_ics_vevent(updated_ics)
+                    return UpdateEventResult(
+                        success=True,
+                        action="update",
+                        calendar=cal_info.name,
+                        uid=event_uid,
+                        summary=parsed.get("summary") or (summary or ""),
+                        start=parsed.get("start") or (start or ""),
+                        end=parsed.get("end") or (end or ""),
+                        location=parsed.get("location") or (location or ""),
+                        description=parsed.get("description") or (description or ""),
+                        url=event_url,
+                    )
+                raise CalendarError(f"Calendar server responded with HTTP {resp.status} on update.")
+        except urllib.error.HTTPError as exc:
+            raise CalendarError(f"Failed to update event (HTTP {exc.code}): {exc.reason}") from exc
+        except Exception as exc:
+            if isinstance(exc, CalendarError):
+                raise
+            raise CalendarError(f"Error updating calendar event: {exc}") from exc
+
+    def move_event(
+        self,
+        event_uid: str,
+        to_calendar: str,
+        from_calendar: Optional[str] = None,
+        new_location: Optional[str] = None,
+    ) -> MoveEventResult:
+        """Move an event from one calendar to another while preserving or updating attributes."""
+        if not event_uid:
+            raise CalendarError("Event UID is required to move.")
+        if not to_calendar:
+            raise CalendarError("Destination calendar name is required.")
+
+        raw_ics, source_url, source_cal = self.get_event_raw(event_uid, calendar_name=from_calendar)
+        if not raw_ics or not source_url or not source_cal:
+            raise CalendarError(f"Event with UID '{event_uid}' not found in source calendar.")
+
+        calendars = self.discover_calendars()
+        target_cal: Optional[CalendarInfo] = None
+        tc_lower = to_calendar.lower()
+        for c in calendars:
+            if tc_lower in c.name.lower():
+                target_cal = c
+                break
+
+        if not target_cal:
+            raise CalendarError(f"Destination calendar '{to_calendar}' not found.")
+
+        updated_ics = raw_ics
+        if new_location is not None:
+            esc = new_location.replace("\\", "\\\\").replace(",", "\\,").replace(";", "\\;").replace("\n", "\\n")
+            if re.search(r"^LOCATION:.*$", updated_ics, flags=re.MULTILINE):
+                updated_ics = re.sub(r"^LOCATION:.*$", f"LOCATION:{esc}", updated_ics, flags=re.MULTILINE)
+            else:
+                updated_ics = updated_ics.replace("END:VEVENT", f"LOCATION:{esc}\r\nEND:VEVENT")
+
+        clean_uid = event_uid if event_uid.endswith(".ics") else f"{event_uid}.ics"
+        dest_url = f"{target_cal.url.rstrip('/')}/{clean_uid}"
+
+        # 1. PUT into destination calendar
+        req_put = self._build_request(
+            "PUT",
+            dest_url,
+            data=updated_ics.encode("utf-8"),
+            headers={"Content-Type": "text/calendar; charset=utf-8"},
+        )
+        try:
+            with urllib.request.urlopen(req_put, timeout=self.config.timeout_seconds) as resp:
+                if resp.status not in (200, 201, 204):
+                    raise CalendarError(f"Destination calendar rejected event: HTTP {resp.status}")
+        except Exception as exc:
+            raise CalendarError(f"Failed to copy event to '{target_cal.name}': {exc}") from exc
+
+        # 2. DELETE from source calendar
+        req_del = self._build_request("DELETE", source_url)
+        try:
+            with urllib.request.urlopen(req_del, timeout=self.config.timeout_seconds) as resp:
+                if resp.status not in (200, 204):
+                    logger.warning(f"Could not delete event from source calendar: HTTP {resp.status}")
+        except Exception as exc:
+            logger.warning(f"Failed to delete event from source calendar after copying: {exc}")
+
+        parsed = parse_ics_vevent(updated_ics)
+        return MoveEventResult(
+            success=True,
+            action="move",
+            from_calendar=source_cal.name,
+            to_calendar=target_cal.name,
+            uid=event_uid,
+            summary=parsed.get("summary", ""),
+            url=dest_url,
+        )
+
+    def batch_mutate(
+        self,
+        operations: List[Dict[str, Any]],
+    ) -> BatchMutationsResult:
+        """Execute a batch list of calendar operations (create, update, delete, move)."""
+        if not operations:
+            raise CalendarError("At least one operation is required for batch mutation.")
+
+        results: List[BatchMutationItemResult] = []
+        succeeded = 0
+        failed = 0
+
+        for idx, op in enumerate(operations):
+            action = str(op.get("action", "")).lower().strip()
+            cal_name = op.get("calendar")
+            uid = op.get("uid")
+
+            try:
+                if action == "create":
+                    res = self.create_event(
+                        summary=op["summary"],
+                        start=op["start"],
+                        end=op["end"],
+                        description=op.get("description", ""),
+                        location=op.get("location", ""),
+                        calendar_name=cal_name,
+                        all_day=op.get("all_day"),
+                    )
+                    results.append(
+                        BatchMutationItemResult(
+                            index=idx,
+                            action=action,
+                            success=True,
+                            uid=res.uid,
+                            calendar=res.calendar,
+                        )
+                    )
+                    succeeded += 1
+
+                elif action == "update":
+                    if not uid:
+                        raise CalendarError("Missing 'uid' for update operation.")
+                    u_res = self.update_event(
+                        event_uid=uid,
+                        summary=op.get("summary"),
+                        start=op.get("start"),
+                        end=op.get("end"),
+                        location=op.get("location"),
+                        description=op.get("description"),
+                        calendar_name=cal_name,
+                        all_day=op.get("all_day"),
+                    )
+                    results.append(
+                        BatchMutationItemResult(
+                            index=idx,
+                            action=action,
+                            success=True,
+                            uid=u_res.uid,
+                            calendar=u_res.calendar,
+                        )
+                    )
+                    succeeded += 1
+
+                elif action == "delete":
+                    if not uid:
+                        raise CalendarError("Missing 'uid' for delete operation.")
+                    d_res = self.delete_event(
+                        event_uid=uid,
+                        calendar_name=cal_name,
+                    )
+                    if d_res.success:
+                        results.append(
+                            BatchMutationItemResult(
+                                index=idx,
+                                action=action,
+                                success=True,
+                                uid=d_res.uid,
+                                calendar=d_res.calendar,
+                            )
+                        )
+                        succeeded += 1
+                    else:
+                        results.append(
+                            BatchMutationItemResult(
+                                index=idx,
+                                action=action,
+                                success=False,
+                                uid=uid,
+                                calendar=cal_name,
+                                error=d_res.error or "Event not found",
+                            )
+                        )
+                        failed += 1
+
+                elif action == "move":
+                    if not uid:
+                        raise CalendarError("Missing 'uid' for move operation.")
+                    to_cal = op.get("to_calendar")
+                    if not to_cal:
+                        raise CalendarError("Missing 'to_calendar' for move operation.")
+                    m_res = self.move_event(
+                        event_uid=uid,
+                        to_calendar=to_cal,
+                        from_calendar=cal_name,
+                        new_location=op.get("location"),
+                    )
+                    results.append(
+                        BatchMutationItemResult(
+                            index=idx,
+                            action=action,
+                            success=True,
+                            uid=m_res.uid,
+                            calendar=m_res.to_calendar,
+                        )
+                    )
+                    succeeded += 1
+
+                else:
+                    raise CalendarError(f"Unsupported batch action: '{action}'")
+
+            except Exception as exc:
+                logger.error(f"Batch item #{idx} ({action}) failed: {exc}")
+                results.append(
+                    BatchMutationItemResult(
+                        index=idx,
+                        action=action,
+                        success=False,
+                        uid=uid,
+                        calendar=cal_name,
+                        error=str(exc),
+                    )
+                )
+                failed += 1
+
+        return BatchMutationsResult(
+            success=(failed == 0),
+            total_operations=len(operations),
+            succeeded_operations=succeeded,
+            failed_operations=failed,
+            results=results,
         )
