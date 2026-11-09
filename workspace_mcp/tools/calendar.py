@@ -132,6 +132,10 @@ class CreateCalendarEventSchema(ToolSchema):
         None,
         description="Whether this is an all-day or multi-day date event (defaults to true if dates like YYYY-MM-DD are passed)",
     )
+    availability: Optional[str] = Field(
+        "busy",
+        description="Availability status: 'busy' (default, blocks calendar) or 'free' (transparent, does not block)",
+    )
     confirm: bool = Field(
         False,
         description="Explicit confirmation to create the calendar event. Must be set to true.",
@@ -167,6 +171,7 @@ class CreateCalendarEventTool(BaseTool):
             location=args.location or "",
             calendar_name=args.calendar,
             all_day=args.all_day,
+            availability=args.availability or "busy",
         )
         return res.model_dump()
 
@@ -253,6 +258,10 @@ class UpdateCalendarEventSchema(ToolSchema):
         None,
         description="Whether this is an all-day or multi-day date event",
     )
+    availability: Optional[str] = Field(
+        None,
+        description="Updated availability status: 'busy' (blocks calendar) or 'free' (transparent, does not block)",
+    )
     notify_attendees: bool = Field(
         False,
         description=(
@@ -296,6 +305,7 @@ class UpdateCalendarEventTool(BaseTool):
             description=args.description,
             calendar_name=args.calendar,
             all_day=args.all_day,
+            availability=args.availability,
             notify_attendees=args.notify_attendees,
         )
         return res.model_dump()

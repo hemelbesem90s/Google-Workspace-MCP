@@ -215,11 +215,13 @@ async def test_create_calendar_event_tool_success() -> None:
             "summary": "Meeting",
             "start": "20261106T100000Z",
             "end": "20261106T110000Z",
+            "availability": "free",
             "confirm": True,
         },
     )
     assert res["success"] is True
     assert res["uid"] == "new-uid-123"
+    assert mock_cal.create_event.call_args[1]["availability"] == "free"
 
 
 @pytest.mark.asyncio
@@ -267,9 +269,10 @@ async def test_update_calendar_event_tool() -> None:
     with pytest.raises(ValueError, match="Explicit confirmation"):
         await tool.execute(mock_gmail, mock_cal, {"uid": "ev-123", "summary": "New Title", "confirm": False})
 
-    res = await tool.execute(mock_gmail, mock_cal, {"uid": "ev-123", "summary": "New Title", "confirm": True})
+    res = await tool.execute(mock_gmail, mock_cal, {"uid": "ev-123", "summary": "New Title", "availability": "free", "confirm": True})
     assert res["success"] is True
     assert res["summary"] == "New Title"
+    assert mock_cal.update_event.call_args[1]["availability"] == "free"
 
 
 @pytest.mark.asyncio

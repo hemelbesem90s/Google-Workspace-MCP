@@ -63,6 +63,7 @@ class CalendarEvent(BaseModel):
     end: str = Field("", description="Event end timestamp (ISO 8601 or iCal format)")
     location: str = Field("", description="Event location or conference link")
     status: str = Field("", description="Event confirmation status (e.g., CONFIRMED, TENTATIVE)")
+    availability: str = Field("busy", description="Availability status: 'busy' (TRANSP:OPAQUE) or 'free' (TRANSP:TRANSPARENT)")
     calendar: str = Field("", description="Name of the calendar containing this event")
     href: str = Field("", description="CalDAV resource href path")
 
@@ -79,6 +80,7 @@ class CreateEventResult(BaseModel):
     summary: str
     start: str
     end: str
+    availability: str = "busy"
     url: str
 
 
@@ -109,6 +111,7 @@ class UpdateEventResult(BaseModel):
     end: str
     location: str = ""
     description: str = ""
+    availability: str = "busy"
     url: str
 
 

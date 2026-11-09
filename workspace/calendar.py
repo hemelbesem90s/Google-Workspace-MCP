@@ -65,6 +65,7 @@ def parse_ics_vevent(ics_text: str) -> Dict[str, Any]:
         "end": "",
         "location": "",
         "status": "",
+        "availability": "busy",
     }
     # Unfold lines (RFC 5545 section 3.1)
     unfolded = re.sub(r"\r?\n[ \t]", "", ics_text)
@@ -108,6 +109,8 @@ def parse_ics_vevent(ics_text: str) -> Dict[str, Any]:
             event["end"] = val
         elif prop == "STATUS":
             event["status"] = val
+        elif prop == "TRANSP":
+            event["availability"] = "free" if val.upper() == "TRANSPARENT" else "busy"
 
     return event
 
@@ -120,6 +123,7 @@ def generate_ics(
     description: str = "",
     location: str = "",
     all_day: Optional[bool] = None,
+    availability: str = "busy",
 ) -> str:
     """Generate an RFC 5545 compliant VCALENDAR/VEVENT payload supporting timed and multi-day date events."""
     dtstamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -132,6 +136,7 @@ def generate_ics(
 
     dtstart_line = f"DTSTART;VALUE=DATE:{start_val}" if start_all_day else f"DTSTART:{start_val}"
     dtend_line = f"DTEND;VALUE=DATE:{end_val}" if end_all_day else f"DTEND:{end_val}"
+    transp_line = "TRANSP:TRANSPARENT" if availability.lower() == "free" else "TRANSP:OPAQUE"
 
     lines = [
         "BEGIN:VCALENDAR",
@@ -150,6 +155,7 @@ def generate_ics(
     if esc_loc:
         lines.append(f"LOCATION:{esc_loc}")
     lines.append("STATUS:CONFIRMED")
+    lines.append(transp_line)
     lines.append("END:VEVENT")
     lines.append("END:VCALENDAR")
     return "\r\n".join(lines) + "\r\n"
@@ -315,6 +321,7 @@ class CalendarClient:
                     end=parsed["end"],
                     location=parsed["location"],
                     status=parsed["status"],
+                    availability=parsed.get("availability", "busy"),
                     calendar=calendar_name,
                     href=href,
                 )
@@ -398,6 +405,7 @@ class CalendarClient:
         location: str = "",
         calendar_name: Optional[str] = None,
         all_day: Optional[bool] = None,
+        availability: str = "busy",
     ) -> CreateEventResult:
         """Create a new calendar event via CalDAV PUT."""
         if not summary:
@@ -430,6 +438,7 @@ class CalendarClient:
         if not target_url:
             raise CalendarError("No accessible calendar endpoint found.")
 
+        clean_avail = "free" if availability.lower() == "free" else "busy"
         domain = self.config.email.split("@")[-1] if "@" in self.config.email else "google.com"
         uid = f"{uuid.uuid4()}@{domain}"
         event_url = f"{target_url.rstrip('/')}/{uid}.ics"
@@ -441,6 +450,7 @@ class CalendarClient:
             description=description,
             location=location,
             all_day=all_day,
+            availability=clean_avail,
         ).encode("utf-8")
 
         req = self._build_request(
@@ -461,6 +471,7 @@ class CalendarClient:
                         summary=summary,
                         start=start,
                         end=end,
+                        availability=clean_avail,
                         url=event_url,
                     )
                 raise CalendarError(f"Calendar server responded with HTTP {resp.status}")
@@ -551,6 +562,7 @@ class CalendarClient:
         description: Optional[str] = None,
         calendar_name: Optional[str] = None,
         all_day: Optional[bool] = None,
+        availability: Optional[str] = None,
         notify_attendees: bool = False,
     ) -> UpdateEventResult:
         """Update an existing calendar event's metadata without changing its UID.
@@ -607,6 +619,14 @@ class CalendarClient:
             else:
                 updated_ics = updated_ics.replace("END:VEVENT", f"{end_line}\r\nEND:VEVENT")
 
+        if availability is not None:
+            transp_val = "TRANSPARENT" if availability.lower() == "free" else "OPAQUE"
+            transp_line = f"TRANSP:{transp_val}"
+            if re.search(r"^TRANSP:.*$", updated_ics, flags=re.MULTILINE):
+                updated_ics = re.sub(r"^TRANSP:.*$", transp_line, updated_ics, flags=re.MULTILINE)
+            else:
+                updated_ics = updated_ics.replace("END:VEVENT", f"{transp_line}\r\nEND:VEVENT")
+
         req = self._build_request(
             "PUT",
             event_url,
@@ -627,6 +647,7 @@ class CalendarClient:
                         end=parsed.get("end") or (end or ""),
                         location=parsed.get("location") or (location or ""),
                         description=parsed.get("description") or (description or ""),
+                        availability=parsed.get("availability", "busy"),
                         url=event_url,
                     )
                 raise CalendarError(f"Calendar server responded with HTTP {resp.status} on update.")
@@ -745,6 +766,7 @@ class CalendarClient:
                         location=op.get("location", ""),
                         calendar_name=cal_name,
                         all_day=op.get("all_day"),
+                        availability=op.get("availability", "busy"),
                     )
                     results.append(
                         BatchMutationItemResult(
@@ -769,6 +791,7 @@ class CalendarClient:
                         description=op.get("description"),
                         calendar_name=cal_name,
                         all_day=op.get("all_day"),
+                        availability=op.get("availability"),
                         notify_attendees=bool(op.get("notify_attendees", False)),
                     )
                     results.append(

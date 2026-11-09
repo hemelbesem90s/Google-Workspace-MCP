@@ -55,6 +55,7 @@ LOCATION:Room 101
 DTSTART:20261106T100000Z
 DTEND:20261106T110000Z
 STATUS:CONFIRMED
+TRANSP:TRANSPARENT
 END:VEVENT
 END:VCALENDAR"""
 
@@ -66,6 +67,7 @@ END:VCALENDAR"""
     assert parsed["start"] == "20261106T100000Z"
     assert parsed["end"] == "20261106T110000Z"
     assert parsed["status"] == "CONFIRMED"
+    assert parsed["availability"] == "free"
 
 
 def test_generate_ics() -> None:
@@ -76,6 +78,7 @@ def test_generate_ics() -> None:
         end="2026-11-06T14:00:00Z",
         description="Detailed review",
         location="Virtual",
+        availability="free",
     )
     assert "BEGIN:VCALENDAR" in ics
     assert "UID:unique-id-888" in ics
@@ -84,7 +87,17 @@ def test_generate_ics() -> None:
     assert "DTEND:20261106T140000Z" in ics
     assert "DESCRIPTION:Detailed review" in ics
     assert "LOCATION:Virtual" in ics
+    assert "TRANSP:TRANSPARENT" in ics
     assert "END:VCALENDAR" in ics
+
+    ics_busy = generate_ics(
+        uid="unique-id-889",
+        summary="Busy Event",
+        start="2026-11-06T13:00:00Z",
+        end="2026-11-06T14:00:00Z",
+        availability="busy",
+    )
+    assert "TRANSP:OPAQUE" in ics_busy
 
 
 def test_discover_calendars(
