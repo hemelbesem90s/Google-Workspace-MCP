@@ -290,6 +290,28 @@ def test_calendar_http_errors(
         client.delete_event(event_uid="err-uid-123")
 
 
+def test_suppress_attendee_scheduling() -> None:
+    from workspace.calendar import suppress_attendee_scheduling
+
+    sample_ics = (
+        "BEGIN:VCALENDAR\r\n"
+        "BEGIN:VEVENT\r\n"
+        "SUMMARY:Meeting\r\n"
+        "ATTENDEE;CN=John Doe:mailto:john@example.com\r\n"
+        "ATTENDEE:mailto:jane@example.com\r\n"
+        "ATTENDEE;SCHEDULE-AGENT=SERVER;CN=Bob:mailto:bob@example.com\r\n"
+        "END:VEVENT\r\n"
+        "END:VCALENDAR\r\n"
+    )
+
+    res = suppress_attendee_scheduling(sample_ics)
+    assert "SCHEDULE-AGENT=NONE" in res
+    assert "SCHEDULE-AGENT=SERVER" not in res
+    assert "mailto:john@example.com" in res
+    assert "mailto:jane@example.com" in res
+    assert "mailto:bob@example.com" in res
+
+
 def test_calendar_update_move_and_batch(
     mock_config: WorkspaceConfig,
     sample_propfind_xml: bytes,

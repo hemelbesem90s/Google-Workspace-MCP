@@ -253,6 +253,13 @@ class UpdateCalendarEventSchema(ToolSchema):
         None,
         description="Whether this is an all-day or multi-day date event",
     )
+    notify_attendees: bool = Field(
+        False,
+        description=(
+            "Whether to send email update notifications to attendees. Default is false (silent update). "
+            "Set to true only if attendees should receive an email about this modification."
+        ),
+    )
     confirm: bool = Field(
         False,
         description="Explicit confirmation to update the calendar event. Must be set to true.",
@@ -289,6 +296,7 @@ class UpdateCalendarEventTool(BaseTool):
             description=args.description,
             calendar_name=args.calendar,
             all_day=args.all_day,
+            notify_attendees=args.notify_attendees,
         )
         return res.model_dump()
 
@@ -312,6 +320,13 @@ class MoveCalendarEventSchema(ToolSchema):
     location: Optional[str] = Field(
         None,
         description="Optional updated location to set when moving the event",
+    )
+    notify_attendees: bool = Field(
+        False,
+        description=(
+            "Whether to send email update notifications to attendees. Default is false (silent update). "
+            "Set to true only if attendees should receive an email about this modification."
+        ),
     )
     confirm: bool = Field(
         False,
@@ -345,6 +360,7 @@ class MoveCalendarEventTool(BaseTool):
             to_calendar=args.to_calendar,
             from_calendar=args.from_calendar,
             new_location=args.location,
+            notify_attendees=args.notify_attendees,
         )
         return res.model_dump()
 

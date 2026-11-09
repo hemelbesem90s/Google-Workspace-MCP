@@ -155,6 +155,26 @@ def generate_ics(
     return "\r\n".join(lines) + "\r\n"
 
 
+def suppress_attendee_scheduling(ics_text: str) -> str:
+    """Inject SCHEDULE-AGENT=NONE into all ATTENDEE lines to prevent CalDAV servers
+
+    (such as Google Calendar) from automatically dispatching update notification
+    emails to attendees when the event is mutated via PUT.
+    """
+    lines: List[str] = []
+    for line in ics_text.splitlines():
+        if line.startswith("ATTENDEE;") or line.startswith("ATTENDEE:"):
+            if "SCHEDULE-AGENT=" not in line:
+                if line.startswith("ATTENDEE;"):
+                    line = "ATTENDEE;SCHEDULE-AGENT=NONE;" + line[9:]
+                else:
+                    line = "ATTENDEE;SCHEDULE-AGENT=NONE:" + line[9:]
+            else:
+                line = re.sub(r"SCHEDULE-AGENT=[A-Z-]+", "SCHEDULE-AGENT=NONE", line)
+        lines.append(line)
+    return "\r\n".join(lines) + ("\r\n" if ics_text.endswith("\r\n") or ics_text.endswith("\n") else "")
+
+
 class CalendarClient:
     """CalDAV client for Google Calendar multi-calendar operations."""
 
@@ -218,17 +238,38 @@ class CalendarClient:
         calendar_url: str,
         calendar_name: str,
         query: Optional[str] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        expand_recurring: bool = True,
     ) -> List[CalendarEvent]:
-        """Query a single calendar collection using RFC 4791 CalDAV REPORT."""
+        """Query a single calendar collection using RFC 4791 CalDAV REPORT.
+
+        If expand_recurring is True and date range is provided, uses <C:expand>
+        to expand all recurring events (RRULE) into individual occurrences.
+        """
+        # Determine time-range filter and expand elements
+        time_range_xml = ""
+        expand_xml = ""
+
+        if start_date and end_date and expand_recurring:
+            c_start, _ = format_ical_datetime(start_date)
+            c_end, _ = format_ical_datetime(end_date)
+            expand_xml = f'      <C:expand start="{c_start}" end="{c_end}"/>\n'
+            time_range_xml = f'        <C:time-range start="{c_start}" end="{c_end}"/>\n'
+
         report_xml = (
             '<?xml version="1.0" encoding="utf-8" ?>\n'
             '<C:calendar-query xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">\n'
             '  <D:prop>\n'
-            '    <C:calendar-data />\n'
+            '    <C:calendar-data>\n'
+            f'{expand_xml}'
+            '    </C:calendar-data>\n'
             '  </D:prop>\n'
             '  <C:filter>\n'
             '    <C:comp-filter name="VCALENDAR">\n'
-            '      <C:comp-filter name="VEVENT" />\n'
+            '      <C:comp-filter name="VEVENT">\n'
+            f'{time_range_xml}'
+            '      </C:comp-filter>\n'
             '    </C:comp-filter>\n'
             '  </C:filter>\n'
             '</C:calendar-query>'
@@ -329,7 +370,14 @@ class CalendarClient:
 
         all_events: List[CalendarEvent] = []
         for cal in target_calendars:
-            evs = self.query_calendar_events(cal.url, cal.name, query=query)
+            evs = self.query_calendar_events(
+                cal.url,
+                cal.name,
+                query=query,
+                start_date=start_date,
+                end_date=end_date,
+                expand_recurring=True,
+            )
             for ev in evs:
                 ev_date = re.sub(r"[-:]", "", ev.start)[:8]
                 if clean_start_filter and ev_date < clean_start_filter:
@@ -503,8 +551,13 @@ class CalendarClient:
         description: Optional[str] = None,
         calendar_name: Optional[str] = None,
         all_day: Optional[bool] = None,
+        notify_attendees: bool = False,
     ) -> UpdateEventResult:
-        """Update an existing calendar event's metadata without changing its UID."""
+        """Update an existing calendar event's metadata without changing its UID.
+
+        If notify_attendees is False (default), injects SCHEDULE-AGENT=NONE to
+        suppress automatic email invitations/updates to attendees.
+        """
         if not event_uid:
             raise CalendarError("Event UID is required for update.")
 
@@ -513,6 +566,9 @@ class CalendarClient:
             raise CalendarError(f"Event with UID '{event_uid}' not found.")
 
         updated_ics = raw_ics
+
+        if not notify_attendees:
+            updated_ics = suppress_attendee_scheduling(updated_ics)
 
         if summary is not None:
             esc = summary.replace("\\", "\\\\").replace(",", "\\,").replace(";", "\\;").replace("\n", "\\n")
@@ -587,8 +643,13 @@ class CalendarClient:
         to_calendar: str,
         from_calendar: Optional[str] = None,
         new_location: Optional[str] = None,
+        notify_attendees: bool = False,
     ) -> MoveEventResult:
-        """Move an event from one calendar to another while preserving or updating attributes."""
+        """Move an event from one calendar to another while preserving or updating attributes.
+
+        If notify_attendees is False (default), injects SCHEDULE-AGENT=NONE to
+        suppress automatic email invitations/updates to attendees.
+        """
         if not event_uid:
             raise CalendarError("Event UID is required to move.")
         if not to_calendar:
@@ -610,6 +671,9 @@ class CalendarClient:
             raise CalendarError(f"Destination calendar '{to_calendar}' not found.")
 
         updated_ics = raw_ics
+
+        if not notify_attendees:
+            updated_ics = suppress_attendee_scheduling(updated_ics)
         if new_location is not None:
             esc = new_location.replace("\\", "\\\\").replace(",", "\\,").replace(";", "\\;").replace("\n", "\\n")
             if re.search(r"^LOCATION:.*$", updated_ics, flags=re.MULTILINE):
@@ -705,6 +769,7 @@ class CalendarClient:
                         description=op.get("description"),
                         calendar_name=cal_name,
                         all_day=op.get("all_day"),
+                        notify_attendees=bool(op.get("notify_attendees", False)),
                     )
                     results.append(
                         BatchMutationItemResult(
@@ -759,6 +824,7 @@ class CalendarClient:
                         to_calendar=to_cal,
                         from_calendar=cal_name,
                         new_location=op.get("location"),
+                        notify_attendees=bool(op.get("notify_attendees", False)),
                     )
                     results.append(
                         BatchMutationItemResult(

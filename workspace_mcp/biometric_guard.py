@@ -116,16 +116,20 @@ def format_write_prompt(tool_name: str, arguments: Dict[str, Any]) -> str:
         uid = args.get("uid", "[Event UID]")
         summary = args.get("summary")
         sum_str = f" ('{summary}')" if summary else ""
-        return f"Google Workspace MCP: Authorize updating calendar event UID '{uid}'{sum_str}"
+        notify = args.get("notify_attendees", False)
+        notify_str = " (Notify attendees: YES)" if notify else " (Silent update: attendees NOT notified)"
+        return f"Google Workspace MCP: Authorize updating calendar event UID '{uid}'{sum_str}{notify_str}"
 
     if tool_name == "move_calendar_event":
         uid = args.get("uid", "[Event UID]")
         to_cal = args.get("to_calendar", "target calendar")
-        return f"Google Workspace MCP: Authorize moving calendar event UID '{uid}' to '{to_cal}'"
+        notify = args.get("notify_attendees", False)
+        notify_str = " (Notify attendees: YES)" if notify else " (Silent update: attendees NOT notified)"
+        return f"Google Workspace MCP: Authorize moving calendar event UID '{uid}' to '{to_cal}'{notify_str}"
 
     if tool_name == "batch_calendar_mutations":
         ops = args.get("operations", [])
-        return f"Google Workspace MCP: Authorize batch of {len(ops)} calendar mutation(s)"
+        return f"Google Workspace MCP: Authorize batch of {len(ops)} calendar mutation(s) (Silent attendee updates by default)"
 
     return f"Google Workspace MCP: Authorize write tool '{tool_name}'"
 
