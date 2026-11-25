@@ -30,6 +30,203 @@ from workspace.models import (
 logger = logging.getLogger(__name__)
 
 
+def parse_datetime_filter(dt_str: str) -> tuple[datetime.datetime, bool, bool]:
+    """Parse an ISO 8601 or compact iCalendar date/datetime string.
+
+    Supports:
+    - Date-only: ``YYYY-MM-DD``, ``YYYYMMDD``
+    - Datetime: ``YYYY-MM-DDTHH:MM[:SS][Z|±HH:MM]``, ``YYYY-MM-DD HH:MM[:SS][Z|±HH:MM]``,
+      ``YYYYMMDDTHHMMSS[Z]``
+
+    Returns:
+        tuple of (parsed_datetime_in_utc_if_tz_aware, is_date_only, has_tz)
+    """
+    clean = dt_str.strip()
+    if not clean:
+        raise CalendarError("Date/datetime filter cannot be empty.")
+
+    date_match = re.fullmatch(r"(\d{4})-?(\d{2})-?(\d{2})", clean)
+    if date_match:
+        year, month, day = (int(g) for g in date_match.groups())
+        try:
+            return datetime.datetime(year, month, day), True, False
+        except ValueError as exc:
+            raise CalendarError(f"Invalid calendar date '{dt_str}': {exc}") from exc
+
+    compact_dt_match = re.fullmatch(
+        r"(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})(Z)?",
+        clean,
+        flags=re.IGNORECASE,
+    )
+    if compact_dt_match:
+        year, month, day, hour, minute, second = (int(g) for g in compact_dt_match.groups()[:6])
+        z_suffix = compact_dt_match.group(7)
+        try:
+            dt = datetime.datetime(year, month, day, hour, minute, second)
+        except ValueError as exc:
+            raise CalendarError(f"Invalid iCalendar datetime '{dt_str}': {exc}") from exc
+        if z_suffix:
+            return dt.replace(tzinfo=datetime.timezone.utc), False, True
+        return dt, False, False
+
+    # Normalize space separator, trailing Z, and ±HHMM offsets for Python 3.10+ fromisoformat()
+    normalized = clean.replace(" ", "T")
+    if normalized.endswith(("Z", "z")):
+        normalized = normalized[:-1] + "+00:00"
+    normalized = re.sub(r"([+-]\d{2})(\d{2})$", r"\1:\2", normalized)
+
+    try:
+        dt = datetime.datetime.fromisoformat(normalized)
+    except ValueError as exc:
+        raise CalendarError(f"Invalid date or datetime format: '{dt_str}'") from exc
+
+    if dt.tzinfo is not None:
+        return dt.astimezone(datetime.timezone.utc), False, True
+    return dt, False, False
+
+
+def _normalize_cmp_pair(
+    a_dt: datetime.datetime,
+    a_has_tz: bool,
+    b_dt: datetime.datetime,
+    b_has_tz: bool,
+) -> tuple[datetime.datetime, datetime.datetime]:
+    """Return comparable datetimes: UTC-aware if both have tzinfo, otherwise naive wall-clock."""
+    if a_has_tz and b_has_tz:
+        return a_dt, b_dt
+    return a_dt.replace(tzinfo=None), b_dt.replace(tzinfo=None)
+
+
+def _resolve_filter_bounds(
+    start_date: Optional[str],
+    end_date: Optional[str],
+) -> tuple[Optional[tuple[datetime.datetime, bool]], Optional[tuple[datetime.datetime, bool]], bool]:
+    """Parse start_date and end_date into inclusive boundary tuples and emptiness flag.
+
+    Returns:
+        ((start_dt, start_has_tz) | None, (end_dt, end_has_tz) | None, is_inverted_empty)
+    """
+    start_bound: Optional[tuple[datetime.datetime, bool]] = None
+    end_bound: Optional[tuple[datetime.datetime, bool]] = None
+
+    if start_date:
+        s_dt, _, s_has_tz = parse_datetime_filter(start_date)
+        start_bound = (s_dt, s_has_tz)
+
+    if end_date:
+        e_dt, e_date_only, e_has_tz = parse_datetime_filter(end_date)
+        if e_date_only:
+            e_dt = e_dt.replace(hour=23, minute=59, second=59, microsecond=999999)
+        end_bound = (e_dt, e_has_tz)
+
+    if start_bound and end_bound:
+        s_cmp, e_cmp = _normalize_cmp_pair(
+            start_bound[0], start_bound[1], end_bound[0], end_bound[1]
+        )
+        if s_cmp > e_cmp:
+            return start_bound, end_bound, True
+
+    return start_bound, end_bound, False
+
+
+def _event_matches_date_range(
+    event: CalendarEvent,
+    start_date: Optional[str],
+    end_date: Optional[str],
+) -> bool:
+    """Return True if an event overlaps the inclusive [start_date, end_date] filter window."""
+    if not start_date and not end_date:
+        return True
+
+    start_bound, end_bound, is_inverted = _resolve_filter_bounds(start_date, end_date)
+    if is_inverted:
+        return False
+
+    if not event.start:
+        return False
+    try:
+        ev_start_dt, ev_start_date_only, ev_start_has_tz = parse_datetime_filter(event.start)
+    except CalendarError:
+        return False
+
+    ev_end_dt: Optional[datetime.datetime] = None
+    ev_end_has_tz = ev_start_has_tz
+    if event.end:
+        try:
+            ev_end_dt, _, ev_end_has_tz = parse_datetime_filter(event.end)
+        except CalendarError:
+            ev_end_dt = None
+
+    if ev_end_dt is None and ev_start_date_only:
+        ev_end_dt = ev_start_dt + datetime.timedelta(days=1)
+
+    # Determine whether this event has a positive duration [ev_start, ev_end) or is a point event
+    is_interval = False
+    if ev_end_dt is not None:
+        es_cmp, ee_cmp = _normalize_cmp_pair(ev_start_dt, ev_start_has_tz, ev_end_dt, ev_end_has_tz)
+        is_interval = ee_cmp > es_cmp
+
+    if start_bound:
+        fs_dt, fs_has_tz = start_bound
+        if is_interval and ev_end_dt is not None:
+            ee_cmp, fs_cmp = _normalize_cmp_pair(ev_end_dt, ev_end_has_tz, fs_dt, fs_has_tz)
+            if ee_cmp <= fs_cmp:
+                return False
+        else:
+            es_cmp, fs_cmp = _normalize_cmp_pair(ev_start_dt, ev_start_has_tz, fs_dt, fs_has_tz)
+            if es_cmp < fs_cmp:
+                return False
+
+    if end_bound:
+        fe_dt, fe_has_tz = end_bound
+        es_cmp, fe_cmp = _normalize_cmp_pair(ev_start_dt, ev_start_has_tz, fe_dt, fe_has_tz)
+        if es_cmp > fe_cmp:
+            return False
+
+    return True
+
+
+def _build_caldav_time_range(
+    start_date: Optional[str],
+    end_date: Optional[str],
+    expand_recurring: bool,
+) -> tuple[str, str, bool]:
+    """Build RFC 4791 <C:time-range> and <C:expand> XML clauses using UTC YYYYMMDDTHHMMSSZ bounds."""
+    if not start_date and not end_date:
+        return "", "", False
+
+    start_bound, end_bound, is_inverted = _resolve_filter_bounds(start_date, end_date)
+    if is_inverted:
+        return "", "", True
+
+    c_start: Optional[str] = None
+    c_end: Optional[str] = None
+
+    if start_bound:
+        # Pad backward by 1 day so events in any timezone offset (UTC-12..UTC+14) are retrieved
+        s_padded = start_bound[0].replace(tzinfo=None) - datetime.timedelta(days=1)
+        c_start = s_padded.strftime("%Y%m%dT%H%M%SZ")
+
+    if end_bound:
+        # Pad forward by 1 day (from midnight or end-of-day) so exclusive RFC 4791 end > start
+        e_base = end_bound[0].replace(tzinfo=None, microsecond=0)
+        e_padded = e_base + datetime.timedelta(days=1)
+        c_end = e_padded.strftime("%Y%m%dT%H%M%SZ")
+
+    time_range_xml = ""
+    expand_xml = ""
+    if c_start and c_end:
+        time_range_xml = f'        <C:time-range start="{c_start}" end="{c_end}"/>\n'
+        if expand_recurring:
+            expand_xml = f'      <C:expand start="{c_start}" end="{c_end}"/>\n'
+    elif c_start:
+        time_range_xml = f'        <C:time-range start="{c_start}"/>\n'
+    elif c_end:
+        time_range_xml = f'        <C:time-range end="{c_end}"/>\n'
+
+    return time_range_xml, expand_xml, False
+
+
 def format_ical_datetime(dt_str: str, is_all_day: Optional[bool] = None) -> tuple[str, bool]:
     """Format standard ISO 8601 or date strings into iCalendar DTSTART/DTEND format.
 
@@ -51,25 +248,18 @@ def format_ical_datetime(dt_str: str, is_all_day: Optional[bool] = None) -> tupl
     return clean_digits, False
 
 
-def parse_ics_vevent(ics_text: str) -> Dict[str, Any]:
-    """Parse key attributes from a VEVENT iCalendar block.
+def parse_ics_vevents(ics_text: str) -> List[Dict[str, Any]]:
+    """Parse all VEVENT blocks from an iCalendar payload.
 
-    Ensures only properties within BEGIN:VEVENT and END:VEVENT are captured,
-    strictly ignoring VTIMEZONE subcomponents.
+    Strictly isolates properties at the top level of each VEVENT block,
+    ignoring VTIMEZONE and nested subcomponents such as VALARM.
     """
-    event: Dict[str, Any] = {
-        "uid": "",
-        "summary": "",
-        "description": "",
-        "start": "",
-        "end": "",
-        "location": "",
-        "status": "",
-        "availability": "busy",
-    }
+    events: List[Dict[str, Any]] = []
     # Unfold lines (RFC 5545 section 3.1)
     unfolded = re.sub(r"\r?\n[ \t]", "", ics_text)
     in_vevent = False
+    subcomponent_depth = 0
+    current: Dict[str, Any] = {}
 
     for line in unfolded.splitlines():
         line = line.strip()
@@ -77,12 +267,35 @@ def parse_ics_vevent(ics_text: str) -> Dict[str, Any]:
             continue
         if line == "BEGIN:VEVENT":
             in_vevent = True
+            subcomponent_depth = 0
+            current = {
+                "uid": "",
+                "summary": "",
+                "description": "",
+                "start": "",
+                "end": "",
+                "location": "",
+                "status": "",
+                "availability": "busy",
+            }
             continue
         if line == "END:VEVENT":
-            in_vevent = False
+            if in_vevent:
+                events.append(current)
+                in_vevent = False
+                subcomponent_depth = 0
             continue
 
-        if not in_vevent or ":" not in line:
+        if not in_vevent:
+            continue
+
+        if line.upper().startswith("BEGIN:"):
+            subcomponent_depth += 1
+            continue
+        if line.upper().startswith("END:"):
+            subcomponent_depth = max(0, subcomponent_depth - 1)
+            continue
+        if subcomponent_depth > 0 or ":" not in line:
             continue
 
         key_part, val = line.split(":", 1)
@@ -96,23 +309,44 @@ def parse_ics_vevent(ics_text: str) -> Dict[str, Any]:
         )
 
         if prop == "UID":
-            event["uid"] = val
+            current["uid"] = val
         elif prop == "SUMMARY":
-            event["summary"] = val_unescaped
+            current["summary"] = val_unescaped
         elif prop == "DESCRIPTION":
-            event["description"] = val_unescaped
+            current["description"] = val_unescaped
         elif prop == "LOCATION":
-            event["location"] = val_unescaped
+            current["location"] = val_unescaped
         elif prop == "DTSTART":
-            event["start"] = val
+            current["start"] = val
         elif prop == "DTEND":
-            event["end"] = val
+            current["end"] = val
         elif prop == "STATUS":
-            event["status"] = val
+            current["status"] = val
         elif prop == "TRANSP":
-            event["availability"] = "free" if val.upper() == "TRANSPARENT" else "busy"
+            current["availability"] = "free" if val.upper() == "TRANSPARENT" else "busy"
 
-    return event
+    return events
+
+
+def parse_ics_vevent(ics_text: str) -> Dict[str, Any]:
+    """Parse key attributes from the first VEVENT iCalendar block.
+
+    Ensures only properties within BEGIN:VEVENT and END:VEVENT are captured,
+    strictly ignoring VTIMEZONE and nested VALARM subcomponents.
+    """
+    events = parse_ics_vevents(ics_text)
+    if events:
+        return events[0]
+    return {
+        "uid": "",
+        "summary": "",
+        "description": "",
+        "start": "",
+        "end": "",
+        "location": "",
+        "status": "",
+        "availability": "busy",
+    }
 
 
 def generate_ics(
@@ -253,15 +487,14 @@ class CalendarClient:
         If expand_recurring is True and date range is provided, uses <C:expand>
         to expand all recurring events (RRULE) into individual occurrences.
         """
-        # Determine time-range filter and expand elements
-        time_range_xml = ""
-        expand_xml = ""
-
-        if start_date and end_date and expand_recurring:
-            c_start, _ = format_ical_datetime(start_date)
-            c_end, _ = format_ical_datetime(end_date)
-            expand_xml = f'      <C:expand start="{c_start}" end="{c_end}"/>\n'
-            time_range_xml = f'        <C:time-range start="{c_start}" end="{c_end}"/>\n'
+        # Determine RFC 4791 time-range filter and expand elements (always UTC YYYYMMDDTHHMMSSZ)
+        time_range_xml, expand_xml, is_inverted = _build_caldav_time_range(
+            start_date=start_date,
+            end_date=end_date,
+            expand_recurring=expand_recurring,
+        )
+        if is_inverted:
+            return []
 
         report_xml = (
             '<?xml version="1.0" encoding="utf-8" ?>\n'
@@ -308,36 +541,39 @@ class CalendarClient:
             cal_data_elem = resp_node.find(".//{urn:ietf:params:xml:ns:caldav}calendar-data")
 
             if cal_data_elem is not None and cal_data_elem.text:
-                parsed = parse_ics_vevent(cal_data_elem.text)
-                uid = parsed["uid"]
-                if not uid and href:
-                    uid = Path(href).stem
+                for parsed in parse_ics_vevents(cal_data_elem.text):
+                    uid = parsed["uid"]
+                    if not uid and href:
+                        uid = Path(href).stem
 
-                event = CalendarEvent(
-                    uid=uid,
-                    summary=parsed["summary"],
-                    description=parsed["description"],
-                    start=parsed["start"],
-                    end=parsed["end"],
-                    location=parsed["location"],
-                    status=parsed["status"],
-                    availability=parsed.get("availability", "busy"),
-                    calendar=calendar_name,
-                    href=href,
-                )
-
-                if query:
-                    q_lower = query.lower()
-                    matches = (
-                        q_lower in event.summary.lower()
-                        or q_lower in event.description.lower()
-                        or q_lower in event.location.lower()
-                        or q_lower in event.calendar.lower()
+                    event = CalendarEvent(
+                        uid=uid,
+                        summary=parsed["summary"],
+                        description=parsed["description"],
+                        start=parsed["start"],
+                        end=parsed["end"],
+                        location=parsed["location"],
+                        status=parsed["status"],
+                        availability=parsed.get("availability", "busy"),
+                        calendar=calendar_name,
+                        href=href,
                     )
-                    if not matches:
+
+                    if query:
+                        q_lower = query.lower()
+                        matches = (
+                            q_lower in event.summary.lower()
+                            or q_lower in event.description.lower()
+                            or q_lower in event.location.lower()
+                            or q_lower in event.calendar.lower()
+                        )
+                        if not matches:
+                            continue
+
+                    if not _event_matches_date_range(event, start_date, end_date):
                         continue
 
-                events.append(event)
+                    events.append(event)
 
         return events
 
@@ -350,6 +586,11 @@ class CalendarClient:
         limit: int = 25,
     ) -> List[CalendarEvent]:
         """List events across specified calendar or all calendars with optional text and date filters."""
+        if start_date or end_date:
+            _, _, is_inverted = _resolve_filter_bounds(start_date, end_date)
+            if is_inverted:
+                return []
+
         available_calendars = self.discover_calendars()
         target_calendars: List[CalendarInfo] = []
 
@@ -372,9 +613,6 @@ class CalendarClient:
             if not target_calendars and available_calendars:
                 target_calendars = [available_calendars[0]]
 
-        clean_start_filter = re.sub(r"[-:]", "", start_date).replace(" ", "T")[:8] if start_date else None
-        clean_end_filter = re.sub(r"[-:]", "", end_date).replace(" ", "T")[:8] if end_date else None
-
         all_events: List[CalendarEvent] = []
         for cal in target_calendars:
             evs = self.query_calendar_events(
@@ -386,10 +624,7 @@ class CalendarClient:
                 expand_recurring=True,
             )
             for ev in evs:
-                ev_date = re.sub(r"[-:]", "", ev.start)[:8]
-                if clean_start_filter and ev_date < clean_start_filter:
-                    continue
-                if clean_end_filter and ev_date > clean_end_filter:
+                if not _event_matches_date_range(ev, start_date, end_date):
                     continue
                 all_events.append(ev)
 

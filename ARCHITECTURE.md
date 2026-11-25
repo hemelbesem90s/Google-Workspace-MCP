@@ -80,7 +80,7 @@ To query events without downloading entire iCalendar databases, the client dispa
 ```
 
 ### VEVENT Isolation
-Google CalDAV responses bundle timezone definitions (`VTIMEZONE`) containing `DTSTART` fields that can be decades old. The parser in `parse_ics_vevent()` extracts properties exclusively within `BEGIN:VEVENT` and `END:VEVENT` blocks, completely isolating event dates from timezone definitions.
+Google CalDAV responses bundle timezone definitions (`VTIMEZONE`) containing `DTSTART` fields that can be decades old, and `VEVENT` blocks may contain nested `VALARM` subcomponents or multiple recurrence instances. The parsers in `parse_ics_vevents()` and `parse_ics_vevent()` extract top-level properties exclusively within `BEGIN:VEVENT` and `END:VEVENT` blocks, completely isolating event dates from timezone definitions and alarm subcomponents.
 
 ---
 
